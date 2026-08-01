@@ -1,0 +1,8 @@
+-r requirements.txt
+
+pytest>=8.0
+pytest-asyncio>=0.23
+
+# 只有 scripts/migrate.py 用得到(直連 Postgres 跑 DDL);
+# 應用程式本身走 PostgREST,不需要資料庫驅動
+psycopg[binary]>=3.1

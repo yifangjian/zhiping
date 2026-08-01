@@ -1,0 +1,34 @@
+# === 憑證與環境變數(絕對不能進版控)===
+.env
+.env.*
+!.env.example
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === 資料庫與匯出檔(可能含真實對話與記憶,屬敏感個資)===
+*.db
+*.sqlite
+*.sqlite3
+data/
+exports/
+backups/
+*-backup-*.json
+
+# === 編輯器與作業系統 ===
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# === Claude Code 本機覆寫設定(可能含個人路徑)===
+.claude/settings.local.json

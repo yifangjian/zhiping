@@ -1,0 +1,6 @@
+# 執行環境:Python 3.11+(程式碼語法保持 3.9 相容)
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+httpx>=0.27,<1.0
+openai>=1.40,<2.0
+python-dotenv>=1.0,<2.0
