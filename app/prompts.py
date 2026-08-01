@@ -203,7 +203,7 @@ def to_second_person(content: str) -> str:
 def format_memory_block(memories: List[Dict[str, Any]]) -> str:
     """把記憶依 category 分組,組成 system prompt 裡的記憶區塊(見 3.1)。
 
-    分組是為了讓 LLM 看得出這些事實的性質不同——「他討厭下雨」和「他姐姐叫小美」
+    分組是為了讓 LLM 看得出這些事實的性質不同——「他討厭下雨」和「他室友叫小美」
     混在同一串裡,模型比較容易把兩者當成同一種東西來引用。
     """
     if not memories:
