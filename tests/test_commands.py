@@ -180,3 +180,29 @@ async def test_一般對話不受影響():
 
     assert await handler.handle(runtime, USER, "今天海上風浪很大") is None
     assert await handler.handle(runtime, USER, "") is None
+
+
+async def test_抱怨知平忘記不是刪除指令():
+    """實機踩到的:知平說「你現在都在台灣了」,使用者回「你忘了我在船上實習嗎?」
+    結果它列出正確的記憶問要不要刪掉——他在糾正它,它卻要刪掉那條正確的記憶。
+    """
+    complaints = [
+        "你忘了我在船上實習嗎?",
+        "你是不是忘記我在船上了",
+        "你怎麼忘了我討厭吃泡麵",
+        "你又忘了喔",
+        "妳忘了我跟你講過的事",
+    ]
+    for text in complaints:
+        handler, runtime = make_handler()
+        assert await handler.handle(runtime, USER, text) is None, text
+        assert runtime.db.updates == []
+
+
+async def test_有請求語氣的還是指令():
+    """「你可以忘掉那件事嗎」跟「你忘了那件事嗎」意思相反,不能一起擋掉。"""
+    handler, runtime = make_handler()
+
+    reply = await handler.handle(runtime, USER, "你可以幫我忘掉泡麵那件事嗎")
+
+    assert reply is not None and "你喜歡吃泡麵" in reply

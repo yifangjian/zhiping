@@ -11,6 +11,7 @@ from app.clients.openai_client import ChatResult
 from app.config import load_settings
 from app.runtime import Runtime
 from app.services.commands import CommandHandler
+from app.services.documents import DocumentCache
 from app.services.inbox import MessageBatcher
 
 DEFAULT_REPLY = "欸真的假的,今天特別忙?"
@@ -144,6 +145,7 @@ class FakeDB:
         # 短期脈絡。fetch_context 的資料庫端是 created_at 降序,所以這裡也照著給
         self.history = history or []
         self.unextracted: List[Dict[str, Any]] = []
+        self.documents: List[Dict[str, Any]] = []
         # 記下每次查詢的參數,測試才驗得到「本次訊息有沒有被排除在脈絡外」
         self.select_params: List[tuple] = []
 
@@ -154,6 +156,9 @@ class FakeDB:
         if table == "memory_audit":
             self.audits.append(row)
             return None
+        if table == "documents":
+            self.rows.append(row)
+            return dict(row, id="doc-{}".format(len(self.rows)))
         if table == "memories":
             self.created_memories.append(row)
             return dict(row, id="new-memory-{}".format(len(self.created_memories)))
@@ -174,6 +179,8 @@ class FakeDB:
             return [{"id": "u-{}".format(i)} for i in range(self.usage_today)]
         if table == "memories":
             return list(self.memories)
+        if table == "documents":
+            return list(self.documents)
         if table == "memory_audit":
             return list(self.audits)
         if table == "conversations":
@@ -202,4 +209,5 @@ def make_runtime(line=None, openai=None, db=None, settings=None) -> Runtime:
         db=db or FakeDB(),
         batcher=MessageBatcher(window_seconds=TEST_WINDOW),
         commands=CommandHandler(),
+        documents=DocumentCache(),
     )

@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DEFAULT_BACKUP_DIR = "~/zhiping-backups"
 
-TABLES = ["conversations", "memories", "user_state"]
+TABLES = ["conversations", "memories", "user_state", "documents"]
 
 
 def resolve_backup_dir() -> pathlib.Path:

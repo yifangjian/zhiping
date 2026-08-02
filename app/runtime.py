@@ -14,6 +14,7 @@ from app.clients.openai_client import OpenAIClient
 from app.clients.supabase import SupabaseClient
 from app.config import Settings
 from app.services.commands import CommandHandler
+from app.services.documents import DocumentCache
 from app.services.inbox import MessageBatcher
 
 
@@ -27,6 +28,8 @@ class Runtime:
     # 必須跟用戶端一樣活得跟應用程式一樣久
     batcher: MessageBatcher
     commands: CommandHandler
+    # 剛傳過來的檔案內容,讓他可以接著問「幫我整理那份的大綱」
+    documents: DocumentCache
 
     @classmethod
     def create(cls, settings: Settings) -> "Runtime":
@@ -49,6 +52,7 @@ class Runtime:
             ),
             batcher=MessageBatcher(window_seconds=settings.debounce_seconds),
             commands=CommandHandler(),
+            documents=DocumentCache(),
         )
 
     async def aclose(self) -> None:

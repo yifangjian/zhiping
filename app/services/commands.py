@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from app.prompts import CATEGORY_LABELS, to_second_person
-from app.repositories import conversations, memories
+from app.repositories import conversations, documents, memories
 
 if TYPE_CHECKING:  # 只為了型別註解,避免循環 import
     from app.runtime import Runtime
@@ -36,6 +36,15 @@ RECALL_PHRASES = (
     "你還記得我什麼",
     "你記得什麼",
     "你記得我哪些事",
+)
+
+# 檔案內容存在資料庫裡,所以跟記憶一樣要讓他看得到、刪得掉
+FILE_LIST_PHRASES = (
+    "你有我哪些檔案",
+    "你存了我哪些檔案",
+    "我傳過哪些檔案",
+    "你有我什麼檔案",
+    "我傳過什麼檔案",
 )
 
 FORGET_ALL_PHRASES = (
@@ -63,6 +72,26 @@ FORGET_INTENT_WORDS = (
     "別記",
     "不要記",
     "不用記",
+)
+
+# 「你怎麼忘了」而不是「請你忘記」。這些是**在抱怨知平忘記了**,不是刪除指令。
+#
+# 實機踩到的案例:知平說「你現在都在台灣了」,使用者回
+# 「你忘了我在船上實習嗎?」——結果它列出正確的記憶問要不要刪掉。
+# 他在糾正它,它卻要把那條正確的記憶刪掉,這比沒接到指令糟得多。
+#
+# 判斷關鍵是主詞:「**你**忘了…」是在講知平的狀態,
+# 「(請你)忘記…」才是要求。中文裡「你忘」這兩個字連在一起幾乎都是前者。
+COMPLAINT_MARKERS = (
+    "你忘", "妳忘", "是不是忘", "怎麼忘", "又忘", "居然忘", "已經忘", "都忘",
+)
+
+# 但如果句子裡有請求的語氣,那還是指令:「你可以忘掉那件事嗎」。
+# 注意「你可以忘」不含「你忘」,所以多數請求句本來就不會被上面攔到,
+# 這一層是保險。
+REQUEST_MARKERS = (
+    "可以", "能不能", "幫我", "請你", "麻煩", "要不要", "不要再", "別再",
+    "刪掉", "刪除", "把它", "拜託",
 )
 
 # 語尾助詞。「忘記荷包蛋吧」的關鍵字是「荷包蛋」不是「荷包蛋吧」。
@@ -97,6 +126,8 @@ class PendingForget:
 
     memory_ids: List[str]
     created_at: float
+    # 檔案內容存在資料庫裡,所以刪除也要一起處理
+    document_ids: List[str] = field(default_factory=list)
     # 用來遮蔽原始對話的關鍵字。只刪 memories 不夠——使用者當初講那句話的
     # 對話紀錄還在短期脈絡裡,知平照樣講得出來
     keywords: List[str] = field(default_factory=list)
@@ -131,6 +162,9 @@ class CommandHandler:
             if answer is not None:
                 return answer
             # 不是確認也不是取消,當成一般對話,刪除請求就此作廢
+
+        if message in FILE_LIST_PHRASES:
+            return await self._list_documents(runtime, line_user_id)
 
         if message in RECALL_PHRASES:
             return await self._list_memories(runtime, line_user_id)
@@ -168,6 +202,17 @@ class CommandHandler:
 
         return "{}\n\n想刪掉哪條就打「忘記 <關鍵字>」。".format("\n\n".join(blocks))
 
+    async def _list_documents(self, runtime: "Runtime", line_user_id: str) -> str:
+        rows = await documents.list_names(runtime.db, line_user_id)
+        if not rows:
+            return "你還沒傳過檔案給我。"
+
+        lines = "\n".join(
+            "・{}({} 字)".format(row.get("file_name"), row.get("char_count") or 0)
+            for row in rows
+        )
+        return "{}\n\n不想留的話打「忘記 <檔名>」。".format(lines)
+
     # --- 忘記 <關鍵字> ---
 
     async def _ask_forget(
@@ -190,23 +235,29 @@ class CommandHandler:
         rows = await memories.fetch_all_active(runtime.db, line_user_id)
         matched = _match_memories(message, rows)
 
-        if not matched:
+        # 檔案也要能刪——存了他的作業卻刪不掉,那比不存還糟
+        files = await documents.list_names(runtime.db, line_user_id)
+        matched_files = _match_documents(message, files)
+
+        if not matched and not matched_files:
             keyword = _explicit_keyword(message)
             if keyword:
-                return "沒找到跟「{}」有關的記憶。".format(keyword)
+                return "沒找到跟「{}」有關的記憶或檔案。".format(keyword)
             return None
 
         self._pending[line_user_id] = PendingForget(
             memory_ids=[row["id"] for row, _ in matched],
+            document_ids=[row["id"] for row in matched_files],
             keywords=[fragment for _, fragment in matched],
             created_at=time.time(),
         )
 
-        lines = "\n".join(
+        lines = [
             "・{}".format(to_second_person(row.get("content") or ""))
             for row, _ in matched
-        )
-        return "這些要忘記嗎?\n{}\n\n回「好」我就徹底刪掉。".format(lines)
+        ]
+        lines += ["・檔案:{}".format(row.get("file_name")) for row in matched_files]
+        return "這些要忘記嗎?\n{}\n\n回「好」我就徹底刪掉。".format("\n".join(lines))
 
     # --- 忘記全部 ---
 
@@ -248,12 +299,24 @@ class CommandHandler:
 
         if pending.is_forget_all:
             count = await memories.deactivate_all(runtime.db, line_user_id)
-            logger.info("使用者要求忘記全部,停用 %s 條記憶", count)
+            files = await documents.deactivate_all(runtime.db, line_user_id)
+            runtime.documents.clear(line_user_id)
+            logger.info(
+                "使用者要求忘記全部:停用 %s 條記憶、%s 份檔案", count, files
+            )
             return "都忘了。"
 
         count = await memories.deactivate(
             runtime.db, line_user_id, pending.memory_ids, actor=memories.ACTOR_USER
         )
+
+        if pending.document_ids:
+            removed = await documents.deactivate(
+                runtime.db, line_user_id, pending.document_ids
+            )
+            # 快取裡可能還留著剛刪掉的那份
+            runtime.documents.clear(line_user_id)
+            count += removed
 
         # 記憶刪掉還不夠:原始對話還在短期脈絡裡,不遮蔽的話知平照樣講得出來
         hidden = await conversations.hide_containing(
@@ -269,8 +332,21 @@ def _has_forget_intent(message: str) -> bool:
     """這句話有沒有在講「刪掉某件記憶」。
 
     只是初篩,真正決定是不是指令的是「有沒有記憶真的相符」(見 _ask_forget)。
+
+    但有一種句子一定要先擋掉:**抱怨知平忘記了**。「你忘了我在船上實習嗎?」
+    裡面有「忘了」,也跟記憶高度相符,照原本的邏輯會變成「這些要忘記嗎?」——
+    他在糾正它,它卻要刪掉那條正確的記憶。
     """
-    return any(word in message for word in FORGET_INTENT_WORDS)
+    if not any(word in message for word in FORGET_INTENT_WORDS):
+        return False
+
+    if any(word in message for word in COMPLAINT_MARKERS) and not any(
+        word in message for word in REQUEST_MARKERS
+    ):
+        logger.info("這句話是在說知平忘記了,不是刪除指令")
+        return False
+
+    return True
 
 
 def _explicit_keyword(message: str) -> Optional[str]:
@@ -322,6 +398,17 @@ def _is_meaningful_match(fragment: str) -> bool:
     if fragment.startswith("他") and len(fragment) <= 3:
         return False
     return True
+
+
+def _match_documents(message: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """找出這句話講的是哪些檔案,比對的是檔名(去掉副檔名)。"""
+    matched = []
+    for row in rows:
+        stem = (row.get("file_name") or "").rsplit(".", 1)[0]
+        fragment = _longest_common_substring(message, stem)
+        if _is_meaningful_match(fragment):
+            matched.append(row)
+    return matched
 
 
 def _longest_common_substring(left: str, right: str) -> str:

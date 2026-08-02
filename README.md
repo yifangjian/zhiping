@@ -237,7 +237,7 @@ uvicorn app.main:app --reload
 LINE Developers Console 的 Webhook URL 填 `https://<你的網址>/line/webhook`,並關閉「自動回應訊息」。本機開發用 ngrok 之類的工具開對外網址。
 
 ```bash
-pytest    # 145 個測試
+pytest    # 161 個測試
 ```
 
 ### 維運

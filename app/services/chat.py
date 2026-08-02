@@ -42,8 +42,10 @@ from app.prompts import (
     format_memory_block,
 )
 from app.repositories import conversations, memories, usage_log, user_state
+from app.repositories import documents as documents_repo
 from app.services import (
     attachments,
+    documents as document_cache,
     location,
     memory_extraction,
     messenger,
@@ -350,12 +352,21 @@ async def build_user_content(
 
     附件下載與解析都在這裡完成,而且各附件並行處理,不要一個一個等。
     """
+    line_user_id = batch[0]["line_user_id"]
     text_parts = [merge_texts(batch)] if merge_texts(batch) else []
     image_urls: List[str] = []
 
     attachment_messages = [
         m for m in batch if m.get("kind", "text") != "text"
     ]
+
+    # 這批沒有新檔案的話,看看他是不是在問以前傳過的某一份。
+    # 不這麼做的話,他問「幫我整理那份 word 的大綱」時模型手上只有檔名,
+    # 就會拿自己上一則的摘要去編(見 app/services/documents.py)
+    if not any(m.get("kind") == "file" for m in attachment_messages):
+        recalled = await _recall_document(runtime, line_user_id, merge_texts(batch))
+        if recalled:
+            text_parts.append(recalled)
     if attachment_messages:
         results = await asyncio.gather(
             *(_prepare_attachment(runtime, m) for m in attachment_messages),
@@ -387,6 +398,43 @@ async def build_user_content(
     for url in image_urls:
         content.append({"type": "input_image", "image_url": url})
     return content
+
+
+async def _recall_document(
+    runtime: "Runtime", line_user_id: str, text: str
+) -> Optional[str]:
+    """找出他這句話在問的檔案,組成要放進 prompt 的內容。
+
+    兩層:先看行程內快取(剛傳的那份,零成本);沒有的話,只有在這句話
+    看起來是在講檔案時才去資料庫撈——不然每則訊息都要多一次查詢。
+    """
+    mentioned = documents_repo.mentions_document(text)
+
+    cached = runtime.documents.recall_note(line_user_id, mentioned=mentioned)
+    if cached:
+        return cached
+
+    if not mentioned:
+        return None
+
+    try:
+        rows = await documents_repo.fetch_recent(runtime.db, line_user_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("撈取檔案內容失敗")
+        return None
+
+    row = documents_repo.pick_referenced(text, rows)
+    if row is None:
+        return None
+
+    content = row.get("content") or ""
+    if len(content) > document_cache.MAX_RECALL_CHARS:
+        content = content[: document_cache.MAX_RECALL_CHARS]
+
+    return (
+        "(他之前傳過檔案「{}」,內容如下。如果他在問這份就用這些內容回答)"
+        "\n---\n{}\n---".format(row.get("file_name"), content)
+    )
 
 
 async def _prepare_attachment(
@@ -430,6 +478,17 @@ async def _prepare_attachment(
             return "(他傳了檔案「{}」,但你讀不了。原因:{})".format(
                 file_name, note
             ), None
+
+        # 記住內容。快取給接下來幾分鐘的追問用(零成本),
+        # 資料庫則讓他下週想起來還問得到。
+        runtime.documents.put(message["line_user_id"], file_name, text)
+        await documents_repo.create(
+            runtime.db,
+            line_user_id=message["line_user_id"],
+            file_name=file_name,
+            content=text,
+            source_conversation_id=message.get("conversation_id"),
+        )
         header = "(他傳了檔案「{}」,內容如下。{})".format(file_name, note).replace(
             ",)", ")"
         )
