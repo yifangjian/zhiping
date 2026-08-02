@@ -436,5 +436,3 @@ async def _prepare_attachment(
         return "{}\n---\n{}\n---".format(header, text), None
 
     return "(他傳了 {},你處理不了)".format(kind), None
-
-
