@@ -21,7 +21,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from app.prompts import EXTRACTION_SYSTEM_PROMPT, build_extraction_input
-from app.repositories import conversations, memories, usage_log
+from app.repositories import conversations, memories, usage_log, user_state
 
 if TYPE_CHECKING:  # 只為了型別註解,避免循環 import
     from app.runtime import Runtime
@@ -72,6 +72,8 @@ async def _extract(runtime: "Runtime", line_user_id: str) -> None:
         return
 
     existing = await memories.fetch_all_active(runtime.db, line_user_id)
+    state = await user_state.fetch(runtime.db, line_user_id)
+    current_profile = (state or {}).get("profile")
     # 使用者刪掉過的東西不能再被抽回來(見 memories.fetch_user_forgotten)
     forgotten = await memories.fetch_user_forgotten(runtime.db, line_user_id)
 
@@ -88,7 +90,9 @@ async def _extract(runtime: "Runtime", line_user_id: str) -> None:
             {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": build_extraction_input(lines, existing, forgotten),
+                "content": build_extraction_input(
+                    lines, existing, forgotten, current_profile
+                ),
             },
         ],
         model=runtime.settings.openai_extract_model,
@@ -113,17 +117,20 @@ async def _extract(runtime: "Runtime", line_user_id: str) -> None:
         logger.warning("抽取結果不是合法 JSON,保留這批對話待下次重試")
         return
 
-    applied = await _apply(runtime, line_user_id, payload, existing, rows)
+    applied = await _apply(
+        runtime, line_user_id, payload, existing, rows, current_profile
+    )
 
     marked = await conversations.mark_extracted(
         runtime.db, [row["id"] for row in rows if row.get("id")]
     )
     logger.info(
-        "記憶抽取完成:處理 %s 則對話,新增 %s、更新 %s、停用 %s",
+        "記憶抽取完成:處理 %s 則對話,新增 %s、更新 %s、停用 %s、背景更新 %s",
         marked,
         applied["created"],
         applied["updated"],
         applied["deactivated"],
+        applied["profile_changed"],
     )
 
 
@@ -133,7 +140,8 @@ async def _apply(
     payload: Dict[str, Any],
     existing: List[Dict[str, Any]],
     source_rows: List[Dict[str, Any]],
-) -> Dict[str, int]:
+    current_profile: Optional[str] = None,
+) -> Dict[str, Any]:
     """把抽取結果寫進資料庫。"""
     by_id = {memory.get("id"): memory for memory in existing}
     # 記憶來自這批對話,用最後一則當來源,方便事後追溯
@@ -169,12 +177,31 @@ async def _apply(
         )
         updated += 1
 
+    # 背景描述只有在他的根本處境改變時才會被回傳,而且會整個取代舊的。
+    # 這段內容會影響之後每一次對話,所以寫入前再驗一次是不是合規
+    # (長度、有沒有混進行為規則),並留下異動紀錄。
+    profile_changed = False
+    new_profile = payload.get("profile")
+    if new_profile and new_profile != current_profile:
+        profile_changed = await user_state.set_profile(
+            runtime.db,
+            line_user_id,
+            new_profile,
+            actor="extract",
+            before=current_profile,
+        )
+
     valid_ids = [mid for mid in payload["deactivate"] if mid in by_id]
     deactivated = await memories.deactivate(
         runtime.db, line_user_id, valid_ids, actor=memories.ACTOR_EXTRACT
     )
 
-    return {"created": created, "updated": updated, "deactivated": deactivated}
+    return {
+        "created": created,
+        "updated": updated,
+        "deactivated": deactivated,
+        "profile_changed": profile_changed,
+    }
 
 
 def parse_extraction(raw: str) -> Optional[Dict[str, Any]]:
@@ -205,6 +232,7 @@ def parse_extraction(raw: str) -> Optional[Dict[str, Any]]:
         "new_memories": _clean_new(data.get("new_memories")),
         "updates": _clean_updates(data.get("updates")),
         "deactivate": _clean_ids(data.get("deactivate")),
+        "profile": _clean_profile(data.get("profile")),
     }
 
 
@@ -255,6 +283,15 @@ def _clean_ids(items: Any) -> List[str]:
             seen.add(item)
             result.append(item)
     return result
+
+
+def _clean_profile(value: Any) -> Optional[str]:
+    """背景描述的第一道清洗。真正的驗證在 user_state.set_profile,
+    這裡只擋掉明顯不是字串或空白的情況。"""
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _clean_importance(value: Any) -> int:

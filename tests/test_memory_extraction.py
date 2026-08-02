@@ -85,7 +85,12 @@ def test_importance_超出範圍會被夾回_1_到_5():
 def test_缺欄位時不會爆炸():
     parsed = parse_extraction(json.dumps({"new_memories": None}))
 
-    assert parsed == {"new_memories": [], "updates": [], "deactivate": []}
+    assert parsed == {
+        "new_memories": [],
+        "updates": [],
+        "deactivate": [],
+        "profile": None,
+    }
 
 
 async def test_未達門檻不呼叫_API():

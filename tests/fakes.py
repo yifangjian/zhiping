@@ -133,6 +133,7 @@ class FakeDB:
         self.rows: List[Dict[str, Any]] = []
         self.usage: List[Dict[str, Any]] = []
         self.audits: List[Dict[str, Any]] = []
+        self.profile_history: List[Dict[str, Any]] = []
         self.created_memories: List[Dict[str, Any]] = []
         self.updates: List[tuple] = []
         self.error = error
@@ -146,6 +147,7 @@ class FakeDB:
         self.history = history or []
         self.unextracted: List[Dict[str, Any]] = []
         self.documents: List[Dict[str, Any]] = []
+        self.state: Optional[Dict[str, Any]] = None
         # 記下每次查詢的參數,測試才驗得到「本次訊息有沒有被排除在脈絡外」
         self.select_params: List[tuple] = []
 
@@ -155,6 +157,9 @@ class FakeDB:
             return None
         if table == "memory_audit":
             self.audits.append(row)
+            return None
+        if table == "profile_history":
+            self.profile_history.append(row)
             return None
         if table == "documents":
             self.rows.append(row)
@@ -181,6 +186,8 @@ class FakeDB:
             return list(self.memories)
         if table == "documents":
             return list(self.documents)
+        if table == "user_state":
+            return [self.state] if self.state else []
         if table == "memory_audit":
             return list(self.audits)
         if table == "conversations":
@@ -188,6 +195,10 @@ class FakeDB:
                 return list(self.unextracted)
             return list(self.history)
         return []
+
+    async def upsert(self, table: str, row: Dict[str, Any], on_conflict: str):
+        self.rows.append(row)
+        return dict(row, id="upsert-{}".format(len(self.rows)))
 
     async def update(self, table: str, params: Dict[str, Any], values: Dict[str, Any]):
         self.updates.append((table, params, values))

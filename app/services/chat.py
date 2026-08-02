@@ -290,6 +290,7 @@ async def _generate_reply(
     instructions = build_system_prompt(
         local_time=user_state.local_time_string(tz_name),
         timezone=tz_name,
+        profile=(state or {}).get("profile"),
         memory_block=format_memory_block(memory_rows),
         context_notice=context_notice(history),
     )

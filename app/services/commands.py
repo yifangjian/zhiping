@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from app.prompts import CATEGORY_LABELS, to_second_person
-from app.repositories import conversations, documents, memories
+from app.repositories import conversations, documents, memories, user_state
 
 if TYPE_CHECKING:  # 只為了型別註解,避免循環 import
     from app.runtime import Runtime
@@ -181,8 +181,19 @@ class CommandHandler:
 
     async def _list_memories(self, runtime: "Runtime", line_user_id: str) -> str:
         rows = await memories.fetch_all_active(runtime.db, line_user_id)
+
+        # 背景描述也要讓他看得到。它會進每一次對話的 system prompt,
+        # 而且會隨對話自動更新——一個看不到的東西在默默影響所有回應,不行。
+        state = await user_state.fetch(runtime.db, line_user_id)
+        profile = (state or {}).get("profile")
+        header = (
+            "我對你的基本認識:\n{}\n\n".format(to_second_person(profile))
+            if profile
+            else ""
+        )
+
         if not rows:
-            return "目前還沒記得什麼。多聊幾次就會有了。"
+            return header + "其他還沒記得什麼。多聊幾次就會有了。"
 
         # 一行一條,保持簡短(使用者網路差)
         grouped: Dict[str, List[str]] = {}
@@ -200,7 +211,9 @@ class CommandHandler:
             lines = "\n".join("・{}".format(to_second_person(item)) for item in items)
             blocks.append("{}\n{}".format(label, lines))
 
-        return "{}\n\n想刪掉哪條就打「忘記 <關鍵字>」。".format("\n\n".join(blocks))
+        return header + "{}\n\n想刪掉哪條就打「忘記 <關鍵字>」。".format(
+            "\n\n".join(blocks)
+        )
 
     async def _list_documents(self, runtime: "Runtime", line_user_id: str) -> str:
         rows = await documents.list_names(runtime.db, line_user_id)

@@ -52,16 +52,85 @@ PLACE_TIMEZONES = {
 DEFAULT_TIMEZONE = "Asia/Taipei"
 
 
+HISTORY_TABLE = "profile_history"
+
+# 背景描述的長度上限。它每次對話都會進 prompt,而且會自動更新——
+# 沒有上限的話會慢慢長成一篇小說,把記憶和脈絡的空間吃掉。
+MAX_PROFILE_CHARS = 400
+
+# 背景是**事實描述**,不是行為規則。自動更新若寫進這類句子,
+# 等於讓抽取流程有機會改寫知平的行為(語氣、心理邊界),那條線不能開。
+INSTRUCTION_MARKERS = (
+    "你應該", "你必須", "你要", "請你", "不要說", "不准", "務必",
+    "回答時", "回覆時", "語氣", "口吻",
+)
+
+
 async def fetch(db: SupabaseClient, line_user_id: str) -> Optional[Dict[str, Any]]:
     rows = await db.select(
         TABLE,
         {
             "line_user_id": "eq.{}".format(line_user_id),
-            "select": "line_user_id,timezone,timezone_updated_at",
+            "select": "line_user_id,timezone,timezone_updated_at,profile",
             "limit": "1",
         },
     )
     return rows[0] if rows else None
+
+
+def is_valid_profile(text: str) -> bool:
+    """背景描述是否合規:有內容、不過長、而且不是在下指令。"""
+    cleaned = (text or "").strip()
+    if not cleaned or len(cleaned) > MAX_PROFILE_CHARS:
+        return False
+    return not any(marker in cleaned for marker in INSTRUCTION_MARKERS)
+
+
+async def set_profile(
+    db: SupabaseClient,
+    line_user_id: str,
+    profile: str,
+    actor: str = "extract",
+    before: Optional[str] = None,
+) -> bool:
+    """更新背景描述,並留下異動紀錄。
+
+    背景會影響之後每一次對話,改錯了要查得出來是什麼時候、改成什麼,
+    所以每次變動都寫進 profile_history。
+    """
+    cleaned = (profile or "").strip()
+    if not is_valid_profile(cleaned):
+        logger.warning("拒絕不合規的背景描述(過長或含行為指令)")
+        return False
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        await db.upsert(
+            TABLE,
+            {
+                "line_user_id": line_user_id,
+                "profile": cleaned,
+                "profile_updated_at": now,
+                "updated_at": now,
+            },
+            on_conflict="line_user_id",
+        )
+        await db.insert(
+            HISTORY_TABLE,
+            {
+                "line_user_id": line_user_id,
+                "before_text": before,
+                "after_text": cleaned,
+                "actor": actor,
+            },
+            returning=False,
+        )
+    except SupabaseError as exc:
+        logger.error("更新背景描述失敗:%s", exc)
+        return False
+
+    logger.info("背景描述已更新(%s):%s", actor, cleaned[:40])
+    return True
 
 
 async def set_timezone(
