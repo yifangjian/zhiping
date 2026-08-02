@@ -177,3 +177,48 @@ async def test_抽取時會把目前的背景帶進去問():
     prompt = runtime.openai.calls[0][-1]["content"]
     assert "目前的背景描述" in prompt
     assert "輪機系的實習生" in prompt
+
+
+# --- 從零開始認識 ---
+
+
+def test_沒有背景時明講還不認識():
+    """留一段空白的話,模型會自己填補空缺去猜他是誰;
+    明講「還不知道」反而讓它老實地問。
+    """
+    prompt = build_system_prompt()
+
+    assert "還不知道" in prompt
+    assert "不要猜" in prompt
+
+
+def test_預設不預先假設使用者是誰():
+    """預設一份背景等於替使用者決定他是什麼樣的人。"""
+    assert DEFAULT_PROFILE == ""
+
+
+def test_人格設定裡沒有職業預設():
+    """從零開始的話,PERSONA 也不能埋著「他在船上」這類假設。"""
+    from app.prompts import PERSONA
+
+    for word in ["遠洋商船", "輪機", "機艙", "實習生"]:
+        assert word not in PERSONA, word
+
+
+async def test_對話中講出處境後會建立背景():
+    db = FakeDB()
+    db.state = None  # 全新使用者,還沒有背景
+    db.unextracted = unextracted()
+    payload = {
+        "new_memories": [],
+        "updates": [],
+        "deactivate": [],
+        "profile": "他在醫院當護理師,上三班制,作息常常日夜顛倒。",
+    }
+    runtime = make_runtime(db=db, openai=FakeOpenAI(response=json.dumps(payload)))
+
+    await maybe_extract(runtime, USER)
+
+    assert db.profile_history
+    assert "護理師" in db.profile_history[0]["after_text"]
+    assert db.profile_history[0]["before_text"] is None
