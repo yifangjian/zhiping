@@ -10,7 +10,7 @@ import hmac
 from app.clients.line import (
     MAX_TEXT_LENGTH,
     _text_message,
-    extract_text_event,
+    extract_message_event,
     verify_signature,
 )
 
@@ -58,25 +58,71 @@ def text_event(**overrides) -> dict:
 
 
 def test_解析文字訊息事件():
-    parsed = extract_text_event(text_event())
-    assert parsed == {
-        "event_id": "01ABCDEF",
-        "line_user_id": "U-test-user",
-        "reply_token": "reply-token",
-        "text": "今天很累",
-        "timestamp": 1_700_000_000_000,
+    parsed = extract_message_event(text_event())
+
+    assert parsed["kind"] == "text"
+    assert parsed["text"] == "今天很累"
+    assert parsed["line_user_id"] == "U-test-user"
+    assert parsed["reply_token"] == "reply-token"
+    assert parsed["event_id"] == "01ABCDEF"
+
+
+def test_非文字訊息也要被接住():
+    """沉默是最糟的處理方式——他傳圖過去卻毫無反應,會以為訊息沒送出。"""
+    cases = {
+        "image": {"type": "image", "id": "m1"},
+        "file": {"type": "file", "id": "m2", "fileName": "手冊.pdf", "fileSize": 1024},
+        "sticker": {"type": "sticker", "id": "m3"},
+        "audio": {"type": "audio", "id": "m4"},
+        "video": {"type": "video", "id": "m5"},
+        "location": {
+            "type": "location",
+            "id": "m6",
+            "title": "釜山港",
+            "address": "Busan",
+            "latitude": 35.1,
+            "longitude": 129.0,
+        },
     }
+    for expected_kind, message in cases.items():
+        parsed = extract_message_event(text_event(message=message))
+        assert parsed is not None, expected_kind
+        assert parsed["kind"] == expected_kind
 
 
-def test_略過非文字訊息():
-    assert extract_text_event(text_event(message={"type": "sticker"})) is None
-    assert extract_text_event(text_event(type="follow")) is None
+def test_檔案訊息會帶出檔名():
+    parsed = extract_message_event(
+        text_event(message={"type": "file", "id": "m1", "fileName": "作業.docx"})
+    )
+
+    assert parsed["file_name"] == "作業.docx"
+
+
+def test_位置訊息會帶出座標():
+    parsed = extract_message_event(
+        text_event(
+            message={
+                "type": "location",
+                "id": "m1",
+                "title": "釜山港",
+                "latitude": 35.1,
+                "longitude": 129.0,
+            }
+        )
+    )
+
+    assert parsed["title"] == "釜山港"
+    assert parsed["longitude"] == 129.0
+
+
+def test_略過非訊息事件():
+    assert extract_message_event(text_event(type="follow")) is None
 
 
 def test_略過缺少必要欄位的事件():
     # 群組事件沒有 userId
-    assert extract_text_event(text_event(source={"type": "group"})) is None
-    assert extract_text_event(text_event(replyToken=None)) is None
+    assert extract_message_event(text_event(source={"type": "group"})) is None
+    assert extract_message_event(text_event(replyToken=None)) is None
 
 
 def test_過長的訊息會被截斷():

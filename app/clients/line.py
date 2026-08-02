@@ -20,6 +20,13 @@ logger = logging.getLogger(__name__)
 
 LINE_API_BASE = "https://api.line.me/v2/bot"
 
+# 下載使用者傳來的圖片、影音、檔案要用另一個網域
+LINE_DATA_BASE = "https://api-data.line.me/v2/bot"
+
+# 附件大小上限。船上網路傳大檔本來就會失敗,而且解析大檔會吃掉時間預算。
+# 超過就請他改用文字描述。
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
 # LINE 單則文字訊息的長度上限
 MAX_TEXT_LENGTH = 5000
 
@@ -109,6 +116,31 @@ class LineClient:
             action="loading",
         )
 
+    async def get_content(self, message_id: str) -> Optional[bytes]:
+        """下載使用者傳來的附件內容。太大或失敗就回 None。
+
+        內容只留在記憶體裡,不落地成檔案——那是使用者的私人資料,
+        少一個地方存就少一個外洩的可能。
+        """
+        url = "{}/message/{}/content".format(LINE_DATA_BASE, message_id)
+        try:
+            response = await self._client.get(url, timeout=15.0)
+        except httpx.HTTPError as exc:
+            logger.warning("下載附件失敗:%s", exc)
+            return None
+
+        if not response.is_success:
+            logger.warning(
+                "下載附件回傳 %s:%s", response.status_code, response.text[:200]
+            )
+            return None
+
+        data = response.content
+        if len(data) > MAX_ATTACHMENT_BYTES:
+            logger.warning("附件 %s bytes 超過上限,放棄處理", len(data))
+            return None
+        return data
+
     async def _post(self, path: str, payload: dict, action: str) -> bool:
         try:
             response = await self._client.post(path, json=payload)
@@ -150,30 +182,76 @@ def extract_follow_event(event: dict) -> Optional[dict]:
     return {"line_user_id": line_user_id, "reply_token": reply_token}
 
 
-def extract_text_event(event: dict) -> Optional[dict]:
-    """從 webhook event 取出我們處理得了的文字訊息,取不到就回 None。
+# 我們會處理的訊息型別。不在這裡面的(目前沒有)一律當作不支援,
+# 但仍然會給使用者一個回應——沉默是最糟的處理方式。
+KIND_TEXT = "text"
+KIND_IMAGE = "image"
+KIND_FILE = "file"
+KIND_LOCATION = "location"
+KIND_STICKER = "sticker"
+KIND_AUDIO = "audio"
+KIND_VIDEO = "video"
 
-    只在這裡做欄位挖掘,讓後續流程拿到的是扁平、必要欄位都齊全的 dict。
+
+def extract_message_event(event: dict) -> Optional[dict]:
+    """從 webhook event 取出訊息,取不到就回 None。
+
+    只在這裡做欄位挖掘,讓後續流程拿到的是扁平、必要欄位都齊全的 dict,
+    並且用 `kind` 標示型別,不用再回頭看 LINE 的原始結構。
     """
     if event.get("type") != "message":
         return None
 
     message = event.get("message") or {}
-    if message.get("type") != "text":
-        return None
-
     source = event.get("source") or {}
     line_user_id = source.get("userId")
     reply_token = event.get("replyToken")
-    text = message.get("text")
 
-    if not line_user_id or not reply_token or not text:
+    # 群組訊息沒有 userId,也不是這個專案的使用情境
+    if not line_user_id or not reply_token:
         return None
 
-    return {
+    base = {
         "event_id": event.get("webhookEventId"),
         "line_user_id": line_user_id,
         "reply_token": reply_token,
-        "text": text,
         "timestamp": event.get("timestamp"),
+        "message_id": message.get("id"),
     }
+
+    kind = message.get("type")
+
+    if kind == KIND_TEXT:
+        text = message.get("text")
+        if not text:
+            return None
+        return dict(base, kind=KIND_TEXT, text=text)
+
+    if kind in (KIND_IMAGE, KIND_VIDEO, KIND_AUDIO):
+        return dict(base, kind=kind, text="")
+
+    if kind == KIND_FILE:
+        return dict(
+            base,
+            kind=KIND_FILE,
+            text="",
+            file_name=message.get("fileName") or "檔案",
+            file_size=message.get("fileSize") or 0,
+        )
+
+    if kind == KIND_LOCATION:
+        return dict(
+            base,
+            kind=KIND_LOCATION,
+            text="",
+            address=message.get("address") or "",
+            title=message.get("title") or "",
+            latitude=message.get("latitude"),
+            longitude=message.get("longitude"),
+        )
+
+    if kind == KIND_STICKER:
+        return dict(base, kind=KIND_STICKER, text="")
+
+    logger.info("不支援的訊息型別:%s", kind)
+    return None

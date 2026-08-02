@@ -14,7 +14,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Re
 from app import __version__
 from app.clients.line import (
     extract_follow_event,
-    extract_text_event,
+    extract_message_event,
     verify_signature,
 )
 from app.config import load_settings
@@ -82,7 +82,7 @@ async def line_webhook(
     runtime: Runtime = request.app.state.runtime
 
     for event in payload.get("events", []):
-        message = extract_text_event(event)
+        message = extract_message_event(event)
         if message is not None:
             # 丟背景處理,先讓這個 request 回 200。
             # 訊息不會立刻被回覆——batcher 會等一個 3 秒的窗,把連續送出的

@@ -42,7 +42,13 @@ from app.prompts import (
     format_memory_block,
 )
 from app.repositories import conversations, memories, usage_log, user_state
-from app.services import location, memory_extraction, messenger, notifier
+from app.services import (
+    attachments,
+    location,
+    memory_extraction,
+    messenger,
+    notifier,
+)
 from app.services.formatting import sanitize_for_line
 from app.timeutils import hours_since
 
@@ -107,8 +113,20 @@ async def _try_command(
 async def _maybe_update_timezone(
     runtime: "Runtime", line_user_id: str, batch: List[Dict[str, Any]]
 ) -> None:
-    """使用者提到自己換地方了就更新時區。失敗不影響回覆。"""
-    tz_name = location.detect_from_messages(m["text"] for m in batch)
+    """使用者換地方了就更新時區。失敗不影響回覆。
+
+    兩個來源:傳位置訊息(準),或在對話裡提到(要猜)。位置訊息優先。
+    """
+    tz_name = None
+    for message in batch:
+        if message.get("kind") == "location":
+            tz_name = location.from_location_message(message) or tz_name
+
+    if tz_name is None:
+        tz_name = location.detect_from_messages(
+            m.get("text") or "" for m in batch
+        )
+
     if not tz_name:
         return
     try:
@@ -253,13 +271,14 @@ async def _generate_reply(
     """組出 messages 並呼叫 LLM。"""
     line_user_id = batch[0]["line_user_id"]
 
-    # 三個查詢彼此獨立,並行做完省下大約三分之二的等待時間
-    memory_rows, history, state = await asyncio.gather(
+    # 四件事彼此獨立,並行做完省下大量等待時間——附件下載與解析尤其慢
+    memory_rows, history, state, user_content = await asyncio.gather(
         memories.fetch_active(runtime.db, line_user_id),
         conversations.fetch_context(
             runtime.db, line_user_id, before=batch[0].get("created_at")
         ),
         user_state.fetch(runtime.db, line_user_id),
+        build_user_content(runtime, batch),
     )
 
     tz_name = (state or {}).get("timezone")
@@ -273,7 +292,7 @@ async def _generate_reply(
         context_notice=context_notice(history),
     )
     messages = build_context_messages(history)
-    messages.append({"role": "user", "content": merge_texts(batch)})
+    messages.append({"role": "user", "content": user_content})
 
     logger.info(
         "組出 messages:記憶 %s 條、脈絡 %s 則", len(memory_rows), len(history)
@@ -308,11 +327,114 @@ def context_notice(history: List[Dict[str, Any]]) -> Optional[str]:
 
 
 def merge_texts(batch: List[Dict[str, Any]]) -> str:
-    """把等待窗內的多則訊息合併成一段。
+    """把等待窗內的多則文字訊息合併成一段。
 
     用換行接起來,保留他分次送出的節奏——那本身就是語氣的一部分。
     刻意不加「訊息 1:」之類的標記,那會讓 LLM 用條列的方式回應。
+
+    非文字訊息不在這裡處理,見 build_user_content。
     """
-    return "\n".join(message["text"] for message in batch)
+    return "\n".join(
+        m.get("text") or "" for m in batch if m.get("kind", "text") == "text"
+    ).strip()
+
+
+async def build_user_content(
+    runtime: "Runtime", batch: List[Dict[str, Any]]
+) -> Any:
+    """把這一批訊息組成模型的 user content。
+
+    文字直接進去;圖片以 data URL 交給模型看;PDF / Word 抽出文字後
+    當成一段附註;其餘型別(貼圖、語音、影片)寫成一句說明,讓模型自己
+    用它的語氣回應——**絕不沉默**,那是最糟的處理方式。
+
+    附件下載與解析都在這裡完成,而且各附件並行處理,不要一個一個等。
+    """
+    text_parts = [merge_texts(batch)] if merge_texts(batch) else []
+    image_urls: List[str] = []
+
+    attachment_messages = [
+        m for m in batch if m.get("kind", "text") != "text"
+    ]
+    if attachment_messages:
+        results = await asyncio.gather(
+            *(_prepare_attachment(runtime, m) for m in attachment_messages),
+            return_exceptions=True,
+        )
+        for message, result in zip(attachment_messages, results):
+            if isinstance(result, Exception):
+                logger.exception(
+                    "處理附件失敗:%s", message.get("kind"), exc_info=result
+                )
+                text_parts.append("(他傳了一個東西,但你這邊打不開)")
+                continue
+            note, image_url = result
+            if note:
+                text_parts.append(note)
+            if image_url:
+                image_urls.append(image_url)
+
+    text = "\n".join(part for part in text_parts if part).strip()
+
+    if not image_urls:
+        return text or "(他傳了訊息,但沒有文字內容)"
+
+    # Responses API 的多模態格式。只有真的有圖片時才用這種形狀,
+    # 純文字保持字串,讓歷史訊息與本次訊息的格式一致。
+    content: List[Dict[str, Any]] = []
+    if text:
+        content.append({"type": "input_text", "text": text})
+    for url in image_urls:
+        content.append({"type": "input_image", "image_url": url})
+    return content
+
+
+async def _prepare_attachment(
+    runtime: "Runtime", message: Dict[str, Any]
+) -> tuple:
+    """處理單一附件,回傳 (要加進 prompt 的說明, 圖片 data URL)。"""
+    kind = message.get("kind")
+
+    if kind == "location":
+        place = message.get("title") or message.get("address") or "某個地方"
+        return "(他傳了一個位置:{})".format(place), None
+
+    if kind == "sticker":
+        return "(他傳了一個貼圖,你看不到是哪一個,但那通常代表一種情緒)", None
+
+    if kind == "audio":
+        return "(他傳了一段語音。你聽不到內容,請他打字或直接接話)", None
+
+    if kind == "video":
+        return "(他傳了一段影片。你看不到內容,請他描述一下)", None
+
+    message_id = message.get("message_id")
+    if not message_id:
+        return "(他傳了一個東西,但取不到內容)", None
+
+    data = await runtime.line.get_content(message_id)
+    if data is None:
+        return (
+            "(他傳了一個檔案,但太大或下載失敗。請他改用文字說明或拍照)",
+            None,
+        )
+
+    if kind == "image":
+        # LINE 的圖片訊息一律是 JPEG
+        return None, attachments.to_data_url(data, "image/jpeg")
+
+    if kind == "file":
+        file_name = message.get("file_name") or "檔案"
+        text, note = attachments.extract_document_text(data, file_name)
+        if text is None:
+            return "(他傳了檔案「{}」,但你讀不了。原因:{})".format(
+                file_name, note
+            ), None
+        header = "(他傳了檔案「{}」,內容如下。{})".format(file_name, note).replace(
+            ",)", ")"
+        )
+        return "{}\n---\n{}\n---".format(header, text), None
+
+    return "(他傳了 {},你處理不了)".format(kind), None
 
 

@@ -56,6 +56,41 @@ def detect_timezone_update(text: str) -> Optional[str]:
     return tz_name
 
 
+def from_location_message(message: dict) -> Optional[str]:
+    """從 LINE 的位置訊息判斷時區。
+
+    比從句子猜地名準得多——他人就在那裡,沒有「上次」「打算去」的歧義。
+
+    兩段式:先拿地址字串比對已知地名(這樣拿得到正確的 IANA 時區,
+    夏令時間之類的規則才會對);認不出來就退回用經度估算。
+
+    經度估算是粗的:每 15 度一個時區,不管實際的國界與夏令時間。
+    但在公海上本來就沒有更好的答案,而且誤差最多一小時——
+    總比用台灣時間跟一個在大西洋上的人說「早安」好。
+    """
+    for field in ("address", "title"):
+        value = message.get(field) or ""
+        if value:
+            found = resolve_place(value)
+            if found:
+                return found
+
+    longitude = message.get("longitude")
+    if longitude is None:
+        return None
+
+    try:
+        offset = int(round(float(longitude) / 15.0))
+    except (TypeError, ValueError):
+        return None
+
+    offset = max(-12, min(14, offset))
+    if offset == 0:
+        return "UTC"
+    # Etc/GMT 的正負號是相反的:Etc/GMT-8 代表 UTC+8
+    return "Etc/GMT{}{}".format("-" if offset > 0 else "+", abs(offset))
+
+
 def detect_from_messages(texts) -> Optional[str]:
     """從一批訊息裡找最後一次的地點更新。
 

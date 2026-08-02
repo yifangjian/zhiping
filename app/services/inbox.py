@@ -23,6 +23,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Set
 
 from app.repositories import conversations
+from app.services import attachments
 from app.services.chat import handle_batch
 
 if TYPE_CHECKING:  # 只為了型別註解,避免循環 import
@@ -57,7 +58,8 @@ class MessageBatcher:
                 runtime.db,
                 line_user_id=line_user_id,
                 role=conversations.ROLE_USER,
-                content=message["text"],
+                # 非文字訊息也要留紀錄,否則之後撈脈絡會看到莫名的空白
+                content=attachments.describe(message),
                 webhook_event_id=message.get("event_id"),
             )
         except Exception:  # noqa: BLE001 — 背景任務的最後一道防線

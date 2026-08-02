@@ -1,0 +1,11 @@
+# 憑證絕不上傳(Railway 的環境變數另外設定)
+.env
+.env.*
+
+# 本機開發用,部署不需要
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+docs/
+PROJECT_SPEC.md
